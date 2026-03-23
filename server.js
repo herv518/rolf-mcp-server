@@ -7,18 +7,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = 8787;
+const port = process.env.PORT || 8787;
 
-// Wichtig: Dein Fleetmarkt-Datenpfad – passe das an deinen echten Pfad an!
-const FLEETMARKT_DATA_DIR = '/Users/rolfautohaus/Fleetmarkt/public/data'; // ← HIER ANPASSEN
-const carsFile = path.join(FLEETMARKT_DATA_DIR, 'cars.json');
+const DATA_DIR = path.join(__dirname, 'data');
+const carsFile = path.join(DATA_DIR, 'cars.json');
+
+app.use(express.json({ limit: '1mb' }));
 
 const STOPWORDS = new Set([
   'ein', 'eine', 'einen', 'einem', 'einer', 'der', 'die', 'das', 'den', 'dem', 'des',
   'und', 'oder', 'mit', 'ohne', 'fuer', 'für', 'von', 'im', 'in', 'am', 'an', 'auf',
   'auto', 'wagen', 'fahrzeug', 'suche', 'gesucht', 'bitte', 'gerne', 'soll', 'sollte',
   'unter', 'ueber', 'über', 'bis', 'max', 'maximal', 'budget', 'euro', 'eur', 'ca',
-  'circa', 'etwa', 'moeglichst', 'möglichst', 'am', 'besten', 'wenn', 'fuer', 'fur'
+  'circa', 'etwa', 'moeglichst', 'möglichst', 'am', 'besten', 'wenn', 'fur'
 ]);
 
 const FEATURE_RULES = [
@@ -63,26 +64,24 @@ const FEATURE_RULES = [
   }
 ];
 
-// Hilfsfunktion: Lade cars.json einmal beim Start (oder bei jedem Request, je nach Größe)
 let carsCache = null;
+
 async function loadCars() {
   if (carsCache) return carsCache;
-  try {
-    const data = await fs.readFile(carsFile, 'utf8');
-    const parsed = JSON.parse(data);
-    carsCache = Array.isArray(parsed)
-      ? parsed
-      : Array.isArray(parsed?.cars)
-        ? parsed.cars
-        : Array.isArray(parsed?.data)
-          ? parsed.data
-          : [];
-    console.log(`Geladen: ${carsCache.length} Fahrzeuge`);
-    return carsCache;
-  } catch (err) {
-    console.error('Fehler beim Laden von cars.json:', err);
-    return [];
-  }
+
+  const data = await fs.readFile(carsFile, 'utf8');
+  const parsed = JSON.parse(data);
+
+  carsCache = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.cars)
+      ? parsed.cars
+      : Array.isArray(parsed?.data)
+        ? parsed.data
+        : [];
+
+  console.log(`Geladen: ${carsCache.length} Fahrzeuge`);
+  return carsCache;
 }
 
 function normalizeText(value) {
@@ -168,6 +167,7 @@ function tokenizeWish(wish) {
 
 function parseMoneyCandidate(raw) {
   if (!raw) return null;
+
   let text = String(raw).trim().toLowerCase();
   const hasK = /k|tausend/.test(text);
   text = text.replace(/[^\d,\.]/g, '');
@@ -204,6 +204,7 @@ function extractBudget(wish) {
     /(?:unter|bis|max(?:imal)?|hoechstens|höchstens|nicht mehr als)\s*(\d[\d.,]*\s*(?:k|tausend)?)/i,
     /(\d[\d.,]*\s*(?:k|tausend)?)\s*(?:oder weniger|max)/i
   ];
+
   for (const pattern of maxPatterns) {
     const match = source.match(pattern);
     if (match) {
@@ -216,6 +217,7 @@ function extractBudget(wish) {
     /(?:ab|mindestens|min)\s*(\d[\d.,]*\s*(?:k|tausend)?)/i,
     /(\d[\d.,]*\s*(?:k|tausend)?)\s*(?:oder mehr|min)/i
   ];
+
   for (const pattern of minPatterns) {
     const match = source.match(pattern);
     if (match) {
@@ -321,6 +323,26 @@ function buildReason(reasons, fallbackText) {
   return `Passt wegen: ${uniqueReasons.join(', ')}`;
 }
 
+function parseWish(wish) {
+  const budget = extractBudget(wish);
+  const rawTokens = tokenizeWish(wish);
+  const wishText = normalizeText(wish);
+
+  const keywordTokens = new Set();
+  for (const rule of FEATURE_RULES) {
+    if (hasAny(wishText, rule.wish)) {
+      for (const token of rule.wish) {
+        for (const part of normalizeText(token).split(/\s+/)) {
+          if (part) keywordTokens.add(part);
+        }
+      }
+    }
+  }
+
+  const tokens = rawTokens.filter(token => !keywordTokens.has(token));
+  return { budget, tokens, wishText };
+}
+
 function scoreCar(car, parsedWish) {
   const blob = getCarSearchBlob(car);
   const reasons = [];
@@ -368,26 +390,6 @@ function scoreCar(car, parsedWish) {
   };
 }
 
-function parseWish(wish) {
-  const budget = extractBudget(wish);
-  const rawTokens = tokenizeWish(wish);
-  const wishText = normalizeText(wish);
-
-  const keywordTokens = new Set();
-  for (const rule of FEATURE_RULES) {
-    if (hasAny(wishText, rule.wish)) {
-      for (const token of rule.wish) {
-        for (const part of normalizeText(token).split(/\s+/)) {
-          if (part) keywordTokens.add(part);
-        }
-      }
-    }
-  }
-
-  const tokens = rawTokens.filter(token => !keywordTokens.has(token));
-  return { budget, tokens, wishText };
-}
-
 function getTopMatches(cars, wish, maxResults) {
   const parsedWish = parseWish(wish);
   const desiredCount = Math.min(Math.max(Number(maxResults) || 3, 3), 5);
@@ -415,20 +417,23 @@ function getTopMatches(cars, wish, maxResults) {
   }));
 }
 
-// MCP-Spec – OpenAI erwartet das auf GET /mcp
+app.get('/healthz', (req, res) => {
+  res.status(200).send('OK');
+});
+
 app.get('/mcp', (req, res) => {
   res.json({
     spec: 'mcp/1.0',
     tools: [
       {
         name: 'rolf.match_vehicles',
-        description: 'Findet die besten passenden Fahrzeuge aus dem aktuellen Bestand basierend auf einer Beschreibung des Wunsches (Budget, Anzahl Personen, Verbrauch, Fahrspaß, etc.). Gibt Top-3 bis Top-5 mit kurzer Begründung zurück.',
+        description: 'Findet die besten passenden Fahrzeuge aus dem aktuellen Bestand basierend auf einer Beschreibung des Wunsches.',
         input_schema: {
           type: 'object',
           properties: {
             wish: {
               type: 'string',
-              description: 'Beschreibung des gesuchten Autos (z. B. "Familienauto unter 30000 Euro, Automatik, viel Platz, sparsam")'
+              description: 'Beschreibung des gesuchten Autos'
             },
             max_results: {
               type: 'integer',
@@ -452,7 +457,7 @@ app.get('/mcp', (req, res) => {
           properties: {
             vehicle_id: {
               type: 'string',
-              description: 'Die Fahrzeug-ID (z. B. "21269")'
+              description: 'Die Fahrzeug-ID'
             }
           },
           required: ['vehicle_id']
@@ -467,9 +472,8 @@ app.get('/mcp', (req, res) => {
   });
 });
 
-// Tool-Aufruf-Handler (POST /mcp)
-app.post('/mcp', express.json(), async (req, res) => {
-  const { tool, input } = req.body;
+app.post('/mcp', async (req, res) => {
+  const { tool, input } = req.body || {};
 
   if (!tool || !input) {
     return res.status(400).json({ error: 'Missing tool or input' });
@@ -481,29 +485,24 @@ app.post('/mcp', express.json(), async (req, res) => {
     if (tool === 'rolf.match_vehicles') {
       const { wish, max_results = 3 } = input;
       const matches = getTopMatches(cars, wish, max_results);
+      return res.json({ result: matches.length ? matches : 'Keine passenden Fahrzeuge gefunden.' });
+    }
 
-      res.json({ result: matches.length ? matches : 'Keine passenden Fahrzeuge gefunden.' });
-    } else if (tool === 'rolf.get_vehicle_details') {
+    if (tool === 'rolf.get_vehicle_details') {
       const { vehicle_id } = input;
       const car = cars.find(c => String(c.id || c.master_id) === String(vehicle_id));
-      if (car) {
-        res.json({ result: car });
-      } else {
-        res.json({ result: 'Fahrzeug nicht gefunden.' });
-      }
-    } else {
-      res.status(404).json({ error: 'Unknown tool' });
+      return res.json({ result: car || 'Fahrzeug nicht gefunden.' });
     }
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Internal error' });
+
+    return res.status(404).json({ error: 'Unknown tool' });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
 
-// Health-Check (optional, aber nett)
-app.get('/healthz', (req, res) => res.send('OK'));
-
 app.listen(port, () => {
-  console.log(`Rolf Vehicle Advisor läuft auf http://localhost:${port}`);
-  console.log('MCP-Endpoint: http://localhost:8787/mcp');
+  console.log(`Rolf MCP Server läuft auf Port ${port}`);
+  console.log(`Health: /healthz`);
+  console.log(`MCP: /mcp`);
 });
