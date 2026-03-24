@@ -416,7 +416,9 @@ function getTopMatches(cars, wish, maxResults) {
     match_score: score
   }));
 }
-
+app.get('/.well-known/openai-apps-challenge', (req, res) => {
+  res.type('text/plain').send('25pEUXM9DOCUb3xn91aNavnpCZS00L6__l10cGQM9oU');
+});
 app.get('/healthz', (req, res) => {
   res.status(200).send('OK');
 });
