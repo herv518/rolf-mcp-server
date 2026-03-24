@@ -2,6 +2,11 @@ import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { z } from 'zod';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -68,10 +73,8 @@ let carsCache = null;
 
 async function loadCars() {
   if (carsCache) return carsCache;
-
   const data = await fs.readFile(carsFile, 'utf8');
   const parsed = JSON.parse(data);
-
   carsCache = Array.isArray(parsed)
     ? parsed
     : Array.isArray(parsed?.cars)
@@ -79,8 +82,6 @@ async function loadCars() {
       : Array.isArray(parsed?.data)
         ? parsed.data
         : [];
-
-  console.log(`Geladen: ${carsCache.length} Fahrzeuge`);
   return carsCache;
 }
 
@@ -107,7 +108,6 @@ function parseNumber(value) {
 
   let num = Number(digitsOnly);
   if (!Number.isFinite(num)) return null;
-
   if (hasK && num < 1000) num *= 1000;
   return num;
 }
@@ -119,36 +119,12 @@ function formatNumber(value) {
 
 function getCarSearchBlob(car) {
   const parts = [
-    car?.title,
-    car?.make,
-    car?.brand,
-    car?.manufacturer,
-    car?.model,
-    car?.variant,
-    car?.trim,
-    car?.series,
-    car?.body_type,
-    car?.bodyType,
-    car?.category,
-    car?.vehicle_type,
-    car?.fuel,
-    car?.fuel_type,
-    car?.fuelType,
-    car?.engine_type,
-    car?.transmission,
-    car?.gearbox,
-    car?.drive,
-    car?.drivetrain,
-    car?.description,
-    car?.subtitle,
-    car?.name,
-    car?.equipment,
-    car?.features,
-    car?.highlights,
-    car?.seats,
-    car?.doors
+    car?.title, car?.make, car?.brand, car?.manufacturer, car?.model, car?.variant,
+    car?.trim, car?.series, car?.body_type, car?.bodyType, car?.category, car?.vehicle_type,
+    car?.fuel, car?.fuel_type, car?.fuelType, car?.engine_type, car?.transmission,
+    car?.gearbox, car?.drive, car?.drivetrain, car?.description, car?.subtitle,
+    car?.name, car?.equipment, car?.features, car?.highlights, car?.seats, car?.doors
   ];
-
   return normalizeText(parts.filter(Boolean).join(' '));
 }
 
@@ -167,7 +143,6 @@ function tokenizeWish(wish) {
 
 function parseMoneyCandidate(raw) {
   if (!raw) return null;
-
   let text = String(raw).trim().toLowerCase();
   const hasK = /k|tausend/.test(text);
   text = text.replace(/[^\d,\.]/g, '');
@@ -200,12 +175,10 @@ function extractBudget(wish) {
     max = parseMoneyCandidate(rangeMatch[2]);
   }
 
-  const maxPatterns = [
+  for (const pattern of [
     /(?:unter|bis|max(?:imal)?|hoechstens|höchstens|nicht mehr als)\s*(\d[\d.,]*\s*(?:k|tausend)?)/i,
     /(\d[\d.,]*\s*(?:k|tausend)?)\s*(?:oder weniger|max)/i
-  ];
-
-  for (const pattern of maxPatterns) {
+  ]) {
     const match = source.match(pattern);
     if (match) {
       max = parseMoneyCandidate(match[1]);
@@ -213,12 +186,10 @@ function extractBudget(wish) {
     }
   }
 
-  const minPatterns = [
+  for (const pattern of [
     /(?:ab|mindestens|min)\s*(\d[\d.,]*\s*(?:k|tausend)?)/i,
     /(\d[\d.,]*\s*(?:k|tausend)?)\s*(?:oder mehr|min)/i
-  ];
-
-  for (const pattern of minPatterns) {
+  ]) {
     const match = source.match(pattern);
     if (match) {
       min = parseMoneyCandidate(match[1]);
@@ -226,10 +197,7 @@ function extractBudget(wish) {
     }
   }
 
-  if (min != null && max != null && min > max) {
-    [min, max] = [max, min];
-  }
-
+  if (min != null && max != null && min > max) [min, max] = [max, min];
   return { min, max };
 }
 
@@ -268,9 +236,7 @@ function getPriceScore(price, budget) {
 
 function getFeatureScore(car, wishText, carText, rule) {
   const wishMatched = hasAny(wishText, rule.wish);
-  if (!wishMatched) {
-    return { score: 0, reason: null };
-  }
+  if (!wishMatched) return { score: 0, reason: null };
 
   let score = 0;
   let reason = null;
@@ -294,9 +260,7 @@ function getFeatureScore(car, wishText, carText, rule) {
 
   if (rule.name === 'Kleinwagen') {
     const seats = parseNumber(car?.seats || car?.seat_count || car?.seating_capacity);
-    if (seats != null && seats <= 5) {
-      score += 4;
-    }
+    if (seats != null && seats <= 5) score += 4;
   }
 
   return { score, reason };
@@ -305,7 +269,6 @@ function getFeatureScore(car, wishText, carText, rule) {
 function getTokenScore(tokens, blob) {
   let score = 0;
   const matched = [];
-
   for (const token of tokens) {
     if (token.length < 3) continue;
     if (blob.includes(token)) {
@@ -313,7 +276,6 @@ function getTokenScore(tokens, blob) {
       matched.push(token);
     }
   }
-
   return { score, matched };
 }
 
@@ -404,10 +366,8 @@ function getTopMatches(cars, wish, maxResults) {
       return a.mileage - b.mileage;
     });
 
-  const selected = ranked.slice(0, Math.min(desiredCount, ranked.length));
-
-  return selected.map(({ car, reasons, score }) => ({
-    id: car.id || car.master_id,
+  return ranked.slice(0, Math.min(desiredCount, ranked.length)).map(({ car, reasons, score }) => ({
+    id: String(car.id || car.master_id || ''),
     title: car.title || [car.make, car.model].filter(Boolean).join(' ') || 'Unbekanntes Fahrzeug',
     price: car.price,
     year: car.year,
@@ -416,95 +376,81 @@ function getTopMatches(cars, wish, maxResults) {
     match_score: score
   }));
 }
+
+function buildServer() {
+  const server = new McpServer({
+    name: 'rolf-vehicle-advisor',
+    version: '1.0.0'
+  });
+
+  server.registerTool(
+    'match_vehicles',
+    {
+      title: 'Fahrzeuge finden',
+      description: 'Findet die besten passenden Fahrzeuge aus dem aktuellen Bestand.',
+      inputSchema: {
+        wish: z.string().describe('Beschreibung des gesuchten Autos'),
+        max_results: z.number().int().min(1).max(5).optional().describe('Maximale Anzahl Ergebnisse')
+      }
+    },
+    async ({ wish, max_results = 3 }) => {
+      const cars = await loadCars();
+      const matches = getTopMatches(cars, wish, max_results);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(matches.length ? matches : 'Keine passenden Fahrzeuge gefunden.', null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  server.registerTool(
+    'get_vehicle_details',
+    {
+      title: 'Fahrzeugdetails holen',
+      description: 'Holt die vollständigen Details eines einzelnen Fahrzeugs anhand seiner ID.',
+      inputSchema: {
+        vehicle_id: z.string().describe('Die Fahrzeug-ID')
+      }
+    },
+    async ({ vehicle_id }) => {
+      const cars = await loadCars();
+      const car = cars.find(c => String(c.id || c.master_id) === String(vehicle_id));
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(car || 'Fahrzeug nicht gefunden.', null, 2)
+          }
+        ]
+      };
+    }
+  );
+
+  return server;
+}
+
 app.get('/.well-known/openai-apps-challenge', (req, res) => {
   res.type('text/plain').send('25pEUXM9DOCUb3xn91aNavnpCZS00L6__l10cGQM9oU');
 });
+
 app.get('/healthz', (req, res) => {
   res.status(200).send('OK');
 });
 
-app.get('/mcp', (req, res) => {
-  res.json({
-    spec: 'mcp/1.0',
-    tools: [
-      {
-        name: 'rolf.match_vehicles',
-        description: 'Findet die besten passenden Fahrzeuge aus dem aktuellen Bestand basierend auf einer Beschreibung des Wunsches.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            wish: {
-              type: 'string',
-              description: 'Beschreibung des gesuchten Autos'
-            },
-            max_results: {
-              type: 'integer',
-              description: 'Maximale Anzahl Ergebnisse (default 3, max 5)',
-              default: 3
-            }
-          },
-          required: ['wish']
-        },
-        annotations: {
-          readOnlyHint: true,
-          destructiveHint: false,
-          openWorldHint: false
-        }
-      },
-      {
-        name: 'rolf.get_vehicle_details',
-        description: 'Holt die vollständigen Details eines einzelnen Fahrzeugs anhand seiner ID.',
-        input_schema: {
-          type: 'object',
-          properties: {
-            vehicle_id: {
-              type: 'string',
-              description: 'Die Fahrzeug-ID'
-            }
-          },
-          required: ['vehicle_id']
-        },
-        annotations: {
-          readOnlyHint: true,
-          destructiveHint: false,
-          openWorldHint: false
-        }
-      }
-    ]
+app.all('/mcp', async (req, res) => {
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID()
   });
-});
 
-app.post('/mcp', async (req, res) => {
-  const { tool, input } = req.body || {};
-
-  if (!tool || !input) {
-    return res.status(400).json({ error: 'Missing tool or input' });
-  }
-
-  try {
-    const cars = await loadCars();
-
-    if (tool === 'rolf.match_vehicles') {
-      const { wish, max_results = 3 } = input;
-      const matches = getTopMatches(cars, wish, max_results);
-      return res.json({ result: matches.length ? matches : 'Keine passenden Fahrzeuge gefunden.' });
-    }
-
-    if (tool === 'rolf.get_vehicle_details') {
-      const { vehicle_id } = input;
-      const car = cars.find(c => String(c.id || c.master_id) === String(vehicle_id));
-      return res.json({ result: car || 'Fahrzeug nicht gefunden.' });
-    }
-
-    return res.status(404).json({ error: 'Unknown tool' });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Internal error' });
-  }
+  const server = buildServer();
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
 });
 
 app.listen(port, () => {
   console.log(`Rolf MCP Server läuft auf Port ${port}`);
-  console.log(`Health: /healthz`);
-  console.log(`MCP: /mcp`);
 });
